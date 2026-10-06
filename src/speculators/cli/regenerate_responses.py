@@ -87,7 +87,11 @@ def extract_conversation(
         if role in ("system", "user") and content:
             turns.append({"role": role, "content": content})
         elif role == "tool" and content is not None:
-            results.append((content, _tool_result_names(content)))
+            # A bare result names its tool in the message; Hermes-style content
+            # carries it inside <tool_response>.
+            name = m.get("name")
+            names = [name] if isinstance(name, str) else _tool_result_names(content)
+            results.append((content, names))
         # original assistant/gpt turns are dropped and regenerated
     if any(turn["role"] == "user" for turn in turns):
         return turns, results
