@@ -231,14 +231,14 @@ def load_seen(path: str) -> set[str]:
     return seen
 
 
-async def detect_model(endpoint: str) -> str:
+async def detect_model(endpoint: str, headers: dict[str, str] | None = None) -> str:
     """Automatically detect the model name from the vLLM server."""
     models_endpoint = endpoint.replace("/v1/chat/completions", "/v1/models")
 
     timeout = aiohttp.ClientTimeout(total=10)
     try:
         async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
+            aiohttp.ClientSession(timeout=timeout, headers=headers) as session,
             session.get(models_endpoint) as response,
         ):
             data = await response.json()
@@ -309,6 +309,58 @@ async def _post_chat(
                 raise RuntimeError(message)
             raise InvalidResponseError(message)
         return await response.json()
+
+
+_NVEXT_TOKEN_FIELDS = ("prompt_token_ids", "completion_token_ids")
+
+
+def _nvext_token_ids_request(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ask a Dynamo frontend for token ids; it rejects ``return_token_ids``."""
+    request = {k: v for k, v in payload.items() if k != "return_token_ids"}
+    nvext = dict(request.get("nvext") or {})
+    fields = list(nvext.get("extra_fields") or [])
+    nvext["extra_fields"] = fields + [f for f in _NVEXT_TOKEN_FIELDS if f not in fields]
+    request["nvext"] = nvext
+    return request
+
+
+def _lift_nvext_token_ids(data: dict[str, Any]) -> dict[str, Any]:
+    """Move Dynamo's ``nvext`` token ids to where vLLM's ``return_token_ids`` puts
+    them."""
+    nvext = data.get("nvext") or {}
+    data["prompt_token_ids"] = nvext.get("prompt_token_ids")
+    if data.get("choices"):
+        data["choices"][0]["token_ids"] = nvext.get("completion_token_ids")
+    return data
+
+
+def _unchanged(body: dict[str, Any]) -> dict[str, Any]:
+    return body
+
+
+# --ids-from: how each server is asked for, and returns, token ids.
+_ID_ADAPTERS = {
+    "vllm": (_unchanged, _unchanged),
+    "nvext": (_nvext_token_ids_request, _lift_nvext_token_ids),
+}
+
+
+def _validate_ids_from(value: str) -> str:
+    if value not in _ID_ADAPTERS:
+        raise typer.BadParameter(f"must be one of {', '.join(_ID_ADAPTERS)}")
+    return value
+
+
+def _request_headers(header: list[str] | None, api_key: str | None) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw in header or []:
+        name, sep, value = raw.partition(":")
+        if not sep or not name.strip():
+            raise typer.BadParameter(f'--header must look like "Name: value": {raw!r}')
+        headers[name.strip()] = value.strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +630,7 @@ async def _worker(
     progress,
     stats: dict[str, Any],
     detokenize: Callable[[list[int]], str],
+    ids_from: str = "vllm",
 ):
     """Pull conversations off the queue and regenerate them into boundary rows.
 
@@ -586,9 +639,15 @@ async def _worker(
     conversations still emit the rows completed before the cut.
     """
 
+    adapt_request, adapt_response = _ID_ADAPTERS[ids_from]
+
     async def post(payload: dict[str, Any]) -> dict[str, Any]:
         t0 = time.perf_counter()
-        result = await _post_chat(session, endpoint, payload, max_retries=max_retries)
+        result = adapt_response(
+            await _post_chat(
+                session, endpoint, adapt_request(payload), max_retries=max_retries
+            )
+        )
         latency = time.perf_counter() - t0
         stats["total_request_s"] += latency
         stats["requests"] += 1
@@ -705,13 +764,16 @@ async def _run(  # noqa: C901
     reasoning_effort_dist: dict[str, float] | None,
     temperature_dist: dict[str, float] | None,
     seed: int | None,
+    tokenizer: str | None = None,
+    headers: dict[str, str] | None = None,
+    ids_from: str = "vllm",
 ) -> None:
     """Main async function to process dataset through vLLM endpoints."""
     typer.echo(f"Using endpoint: {endpoint}")
 
     # Auto-detect model if not specified
     if model is None:
-        model = await detect_model(endpoint)
+        model = await detect_model(endpoint, headers)
 
     typer.echo(f"Using model: {model}")
     if reasoning_effort_dist:
@@ -722,7 +784,7 @@ async def _run(  # noqa: C901
         typer.echo(f"Sampling seed: {seed}")
 
     # Decoder for the review-only `text` twin; see build_detokenizer.
-    detokenize = build_detokenizer(model)
+    detokenize = build_detokenizer(tokenizer or model)
 
     dataset_config, hf_dataset, split = load_input_dataset(dataset_name, split, subset)
     dataset_id = dataset_config.hf_path
@@ -757,13 +819,14 @@ async def _run(  # noqa: C901
     connector = aiohttp.TCPConnector(
         limit=0, force_close=False, enable_cleanup_closed=True
     )
-    headers = {
+    session_headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
+        **(headers or {}),
     }
 
     async with aiohttp.ClientSession(
-        timeout=timeout, connector=connector, headers=headers
+        timeout=timeout, connector=connector, headers=session_headers
     ) as session:
         with (
             Path(outfile).open("a", encoding="utf-8") as output_file,  # noqa: ASYNC230
@@ -798,6 +861,7 @@ async def _run(  # noqa: C901
                         err_fh=error_file,
                         progress=progress,
                         stats=stats,
+                        ids_from=ids_from,
                         detokenize=detokenize,
                     )
                 )
@@ -1013,6 +1077,33 @@ def regenerate_responses(
             ),
         ),
     ] = None,
+    tokenizer: Annotated[
+        str | None,
+        typer.Option(
+            help="Tokenizer for the review-only text, when --model is a served "
+            "alias rather than a checkpoint (defaults to --model)",
+        ),
+    ] = None,
+    header: Annotated[
+        list[str] | None,
+        typer.Option(help='Extra request header as "Name: value"; repeatable'),
+    ] = None,
+    api_key: Annotated[
+        str | None,
+        typer.Option(
+            envvar="OPENAI_API_KEY",
+            show_default=False,
+            help="Bearer token for the endpoint",
+        ),
+    ] = None,
+    ids_from: Annotated[
+        str,
+        typer.Option(
+            help='How the server returns token ids: "vllm" (return_token_ids) or '
+            '"nvext" (Dynamo frontends, via nvext.extra_fields)',
+            callback=_validate_ids_from,
+        ),
+    ] = "vllm",
 ) -> None:
     """Regenerate dataset responses via a vLLM Chat API endpoint.
 
@@ -1025,6 +1116,7 @@ def regenerate_responses(
 
     if max_retries < 0:
         raise typer.BadParameter("--max-retries must be >= 0")
+    headers = _request_headers(header, api_key)
 
     parsed_sampling_params: dict[str, Any] = {}
     if sampling_params is not None:
@@ -1068,6 +1160,9 @@ def regenerate_responses(
                 reasoning_effort_dist=parsed_reasoning_effort,
                 temperature_dist=parsed_temperature,
                 seed=seed,
+                tokenizer=tokenizer,
+                headers=headers,
+                ids_from=ids_from,
             )
         )
     except KeyboardInterrupt:
