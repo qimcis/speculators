@@ -6,6 +6,24 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+def window_hidden_states(data: dict, num_tokens: int) -> dict:
+    """The last ``num_tokens`` positions of a payload exported after a prefix.
+
+    Prefix-skipping connectors start saves at a cache-block boundary, so the
+    payload can begin up to one block before the window.
+    """
+    extra = data["token_ids"].shape[0] - num_tokens
+    if extra <= 0:
+        return data
+    return {
+        key: value[extra:]
+        if isinstance(value, torch.Tensor)
+        and value.shape[:1] == data["token_ids"].shape
+        else value
+        for key, value in data.items()
+    }
+
+
 def check_hidden_states(data: dict, tokens: list[int]):
     required = {"token_ids", "hidden_states"}
     missing = required - data.keys()

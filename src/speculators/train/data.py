@@ -11,7 +11,10 @@ from datasets import load_from_disk
 from torch.utils.data import Dataset
 
 from hs_connectors import FileTransfer, HiddenStatesTransfer
-from speculators.data_generation.offline import check_hidden_states
+from speculators.data_generation.offline import (
+    check_hidden_states,
+    window_hidden_states,
+)
 from speculators.data_generation.vllm_client import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_REQUEST_TIMEOUT,
@@ -89,6 +92,8 @@ def build_client_item(dataset_item: dict) -> ClientItem:
     ``messages`` is never created and this guard is a no-op.
     """
     out_dict: dict = {"input_ids": dataset_item["input_ids"].tolist()}
+    if "prefix_ids" in dataset_item and len(dataset_item["prefix_ids"]):
+        out_dict["prefix_ids"] = dataset_item["prefix_ids"].tolist()
 
     if "messages" in dataset_item and _has_multimodal_content(dataset_item["messages"]):
         out_dict["messages"] = dataset_item["messages"]
@@ -252,6 +257,7 @@ class ArrowDataset(BaseDataset):
             loaded_hs = self.transfer.get_generated(handle)
             if loaded_hs is None:
                 raise ValueError(f"Failed to load hidden states for handle {handle}")
+            loaded_hs = window_hidden_states(loaded_hs, len(dataset_item["input_ids"]))
 
             # Covers token/shape mismatches and non-finite values. The Mooncake
             # transfer performs manifest/checksum validation first.
@@ -313,6 +319,7 @@ class ArrowDataset(BaseDataset):
 
         if isinstance(loaded_hs, SampleUnavailable):
             return loaded_hs
+        loaded_hs = window_hidden_states(loaded_hs, len(self.data[index]["input_ids"]))
 
         # loaded_hs structure: {
         #   "hidden_states": [seq_len, num_layers, hidden_size]

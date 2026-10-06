@@ -31,6 +31,7 @@ from speculators.data_generation.offline import (
     check_hidden_states,
     get_existing_hidden_state_indices,
     get_indices_to_process,
+    window_hidden_states,
 )
 from speculators.data_generation.vllm_client import (
     DEFAULT_MAX_RETRIES,
@@ -124,7 +125,7 @@ async def _worker(  # noqa: C901
                         path=target_hidden_states_path,
                         tokens=item["input_ids"],
                     ):
-                        loaded = load_file(path)
+                        loaded = window_hidden_states(load_file(path), len(tokens))
                         check_hidden_states(loaded, tokens)
 
                     await asyncio.to_thread(_load_and_check)

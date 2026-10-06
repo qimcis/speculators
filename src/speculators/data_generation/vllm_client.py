@@ -130,6 +130,19 @@ class ClientItem(TypedDict):
     """If provided, pass `messages` to Chat Completions API
     instead of passing `token_ids` to Completions API."""
 
+    prefix_ids: NotRequired[list[int]]
+    """Context before `input_ids`. It is prefilled so `input_ids` attend to the
+    whole context, but hidden states are only exported for `input_ids`."""
+
+
+def _completion_args(client_item: ClientItem) -> tuple[list[int], dict[str, Any]]:
+    """The prompt and extra request fields for a Completions extraction call."""
+    prefix = client_item.get("prefix_ids") or []
+    extra_body: dict[str, Any] = {"return_token_ids": True}
+    if prefix:
+        extra_body["kv_transfer_params"] = {"hidden_states_start": len(prefix)}
+    return [*prefix, *client_item["input_ids"]], extra_body
+
 
 async def _poll_lock_async(fd, poll_interval):
     while True:
@@ -209,11 +222,12 @@ async def generate_hidden_states_async(
 
     coro: Coroutine[Any, Any, Completion | ChatCompletion]
     if messages is None:
+        token_ids, extra_body = _completion_args(client_item)
         coro = client.completions.create(
             model=model,
             prompt=token_ids,
             max_tokens=1,
-            extra_body={"return_token_ids": True},
+            extra_body=extra_body,
             timeout=timeout,
         )
     else:
@@ -256,11 +270,12 @@ def generate_hidden_states(
 
     res: Completion | ChatCompletion
     if messages is None:
+        token_ids, extra_body = _completion_args(client_item)
         res = client.completions.create(
             model=model,
             prompt=token_ids,
             max_tokens=1,
-            extra_body={"return_token_ids": True},
+            extra_body=extra_body,
             timeout=timeout,
         )
     else:

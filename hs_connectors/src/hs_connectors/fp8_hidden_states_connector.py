@@ -17,6 +17,7 @@ tensors.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import torch
 from safetensors.torch import save_file
@@ -25,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 
 from hs_connectors.fp8_utils import SCALES_KEY, quantize_tensor_to_fp8
+from hs_connectors.prefix import skip_prefix_blocks
 
 
 class FP8HiddenStatesConnector(_eh_mod.ExampleHiddenStatesConnector):
@@ -36,6 +38,17 @@ class FP8HiddenStatesConnector(_eh_mod.ExampleHiddenStatesConnector):
         hidden_states_scales - fp32 [seq_len, 1, 1]
         token_ids            - int64 [seq_len]
     """
+
+    def request_finished(
+        self, request: Any, block_ids: list[int]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        result = super().request_finished(request, block_ids)
+        pending = self._pending_saves.get(request.request_id)
+        if pending is not None:
+            self._pending_saves[request.request_id] = skip_prefix_blocks(
+                pending, request.kv_transfer_params, self._block_size
+            )
+        return result
 
     @staticmethod
     def _write_tensors(

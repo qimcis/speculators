@@ -37,6 +37,7 @@ from hs_connectors.mooncake_store import (
     MooncakeStoreConfig,
     assert_finite,
 )
+from hs_connectors.prefix import skip_prefix_blocks
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -359,11 +360,15 @@ class MooncakeHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             token_ids = torch.tensor([], dtype=torch.long)
 
-        self._pending_saves[req_id] = PendingSave(
-            req_id=req_id,
-            mooncake_key=mooncake_key,
-            token_ids=token_ids,
-            block_ids=list(block_ids),
+        self._pending_saves[req_id] = skip_prefix_blocks(
+            PendingSave(
+                req_id=req_id,
+                mooncake_key=mooncake_key,
+                token_ids=token_ids,
+                block_ids=list(block_ids),
+            ),
+            kv_params,
+            self._block_size,
         )
         # Returning True delays block freeing until get_finished extracts.
         return True, {"handle": mooncake_key}
