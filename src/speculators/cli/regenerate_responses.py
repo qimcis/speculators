@@ -417,9 +417,10 @@ def _sample_from_response(
     content = message.get("content")
     tool_calls = message.get("tool_calls")
 
-    # A tool call legitimately has empty content; only a wholly empty generation
+    # A tool call legitimately has empty content, as does a generation cut off
+    # mid-reasoning (it ends the conversation); only a wholly empty generation
     # corrupts the next prefix and must fail the conversation.
-    if not content and not tool_calls:
+    if not content and not tool_calls and choice.get("finish_reason") != "length":
         raise ValueError(f"empty assistant generation (sample {sample_index})")
 
     prompt_token_ids = data.get("prompt_token_ids")
@@ -546,7 +547,8 @@ async def regenerate_conversation(
             prompt_token_ids = data.get("prompt_token_ids")
             completion_token_ids = data["choices"][0].get("token_ids")
             total_tokens = len(prompt_token_ids or []) + len(completion_token_ids or [])
-            if total_tokens > max_tokens:
+            finish_reason = data["choices"][0].get("finish_reason")
+            if total_tokens > max_tokens or finish_reason == "length":
                 truncated = True
                 break
 
