@@ -24,6 +24,7 @@ from typing import Annotated, Any
 import openai
 import typer
 from datasets import load_from_disk
+from hs_connectors.fp8_utils import dequantize_payload
 from safetensors.torch import load_file
 from tqdm import tqdm
 
@@ -125,7 +126,9 @@ async def _worker(  # noqa: C901
                         path=target_hidden_states_path,
                         tokens=item["input_ids"],
                     ):
-                        loaded = window_hidden_states(load_file(path), len(tokens))
+                        loaded = window_hidden_states(
+                            dequantize_payload(load_file(path)), len(tokens)
+                        )
                         check_hidden_states(loaded, tokens)
 
                     await asyncio.to_thread(_load_and_check)
