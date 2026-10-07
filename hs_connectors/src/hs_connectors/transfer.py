@@ -189,8 +189,9 @@ class FileBackend(HiddenStatesBackend):
     @staticmethod
     def build_kv_transfer_config(args: argparse.Namespace) -> dict[str, Any]:
         return {
-            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_connector": "FileHiddenStatesConnector",
             "kv_role": "kv_producer",
+            "kv_connector_module_path": "hs_connectors.file_hidden_states_connector",
             "kv_connector_extra_config": {
                 "shared_storage_path": args.hidden_states_path,
             },
