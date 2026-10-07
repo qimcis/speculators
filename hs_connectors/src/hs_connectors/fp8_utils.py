@@ -59,3 +59,19 @@ def dequantize_fp8_tensor(
 ) -> torch.Tensor:
     """Dequantize an FP8 tensor (with its scales) back to ``dtype``."""
     return fp8_tensor.to(dtype) * scale.to(dtype)
+
+
+def dequantize_payload(
+    sample: dict[str, torch.Tensor], dtype: torch.dtype = torch.bfloat16
+) -> dict[str, torch.Tensor]:
+    """A saved payload with FP8 hidden states turned back into ``dtype``.
+
+    Payloads without a scales tensor are returned unchanged.
+    """
+    if SCALES_KEY not in sample:
+        return sample
+    restored = {k: v for k, v in sample.items() if k != SCALES_KEY}
+    restored["hidden_states"] = dequantize_fp8_tensor(
+        sample["hidden_states"], sample[SCALES_KEY], dtype=dtype
+    )
+    return restored

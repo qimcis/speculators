@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import torch
 from safetensors.torch import load_file
 
-from hs_connectors.fp8_utils import SCALES_KEY, dequantize_fp8_tensor
+from hs_connectors.fp8_utils import dequantize_payload
 from hs_connectors.mooncake_store import MooncakeHiddenStatesStore, MooncakeStoreConfig
 
 if TYPE_CHECKING:
@@ -222,15 +222,9 @@ class FP8Transfer(FileTransfer):
     def _dequantize(
         self, sample: dict[str, torch.Tensor] | None
     ) -> dict[str, torch.Tensor] | None:
-        if sample is None or SCALES_KEY not in sample:
+        if sample is None:
             return sample
-        scales = sample[SCALES_KEY]
-        dequantized = dict(sample)
-        dequantized["hidden_states"] = dequantize_fp8_tensor(
-            sample["hidden_states"], scales, dtype=self.dequantize_dtype
-        )
-        del dequantized[SCALES_KEY]
-        return dequantized
+        return dequantize_payload(sample, self.dequantize_dtype)
 
     def get_cached(self, file_idx: int) -> dict[str, torch.Tensor] | None:
         return self._dequantize(super().get_cached(file_idx))
