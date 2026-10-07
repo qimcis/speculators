@@ -1,6 +1,6 @@
 """FP8-quantizing sibling of vLLM's ``ExampleHiddenStatesConnector``.
 
-Quantizes hidden states to ``float8_e4m3fn`` (per-token scaling) before
+Quantizes hidden states to ``float8_e4m3fn`` (a scale per token and layer) before
 writing them to disk, roughly halving the on-disk/on-wire size of extracted
 hidden states relative to the bf16 baseline. Everything else
 (async DtoH copy, thread-pool disk writes, file locking, scheduler-side
@@ -33,7 +33,7 @@ class FP8HiddenStatesConnector(_eh_mod.ExampleHiddenStatesConnector):
     The output file contains three tensors::
 
         hidden_states        - fp8 [seq_len, num_layers, hidden_size]
-        hidden_states_scales - fp32 [seq_len, 1, 1]
+        hidden_states_scales - fp32 [seq_len, num_layers, 1]
         token_ids            - int64 [seq_len]
     """
 
