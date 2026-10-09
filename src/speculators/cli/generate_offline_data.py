@@ -120,18 +120,18 @@ async def _worker(  # noqa: C901
                     shutil.move, hidden_states_path, target_hidden_states_path
                 )
                 write_s = time.perf_counter() - t_write
-                if validate_outputs:
+            if validate_outputs:
 
-                    def _load_and_check(
-                        path=target_hidden_states_path,
-                        tokens=item["input_ids"],
-                    ):
-                        loaded = window_hidden_states(
-                            dequantize_payload(load_file(path)), len(tokens)
-                        )
-                        check_hidden_states(loaded, tokens)
+                def _load_and_check(
+                    path=target_hidden_states_path,
+                    tokens=item["input_ids"],
+                ):
+                    loaded = window_hidden_states(
+                        dequantize_payload(load_file(path)), len(tokens)
+                    )
+                    check_hidden_states(loaded, tokens)
 
-                    await asyncio.to_thread(_load_and_check)
+                await asyncio.to_thread(_load_and_check)
         except Exception as e:
             if fail_on_error:
                 logger.exception(
@@ -217,6 +217,7 @@ async def _generate_and_save_hidden_states(
     output: str | None,
     max_samples: int | None,
     concurrency: int,
+    pending_saves: int,
     validate_outputs: bool,
     request_timeout: float,
     max_retries: int,
@@ -305,7 +306,7 @@ async def _generate_and_save_hidden_states(
                         stats,
                     )
                 )
-                for _ in range(concurrency * 2)
+                for _ in range(concurrency + pending_saves)
             ]
 
             await _feed_queue(to_process, dataset, queue, cancel_event)
@@ -374,10 +375,19 @@ def generate_offline_data(
         typer.Option(
             help=(
                 "Number of active vLLM requests at a time. "
-                "Note: number of async workers set to 2*concurrency"
+                "Note: number of async workers set to concurrency + pending-saves"
             ),
         ),
     ] = 32,
+    pending_saves: Annotated[
+        int,
+        typer.Option(
+            help=(
+                "Finished requests whose file wait, move and validation may run "
+                "while the next requests are in flight"
+            ),
+        ),
+    ] = 4,
     validate_outputs: Annotated[
         bool,
         typer.Option(
@@ -464,6 +474,7 @@ def generate_offline_data(
                 output=output,
                 max_samples=max_samples,
                 concurrency=concurrency,
+                pending_saves=pending_saves,
                 validate_outputs=validate_outputs,
                 request_timeout=request_timeout,
                 max_retries=max_retries,
