@@ -326,7 +326,10 @@ class ArrowDataset(BaseDataset):
         #   "token_ids": [seq_len]
         # }
 
-        if not torch.equal(loaded_hs["token_ids"], self.data[index]["input_ids"]):
+        expected = torch.as_tensor(
+            self.data[index]["input_ids"], dtype=loaded_hs["token_ids"].dtype
+        )
+        if not torch.equal(loaded_hs["token_ids"].cpu(), expected.cpu()):
             warnings.warn(
                 f"Loaded token ids {loaded_hs['token_ids']} for index {index} don't"
                 f"match input ids {self.data[index]['input_ids']}",
