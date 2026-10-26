@@ -280,6 +280,11 @@ def loss_backward_kernel(
         lse_t = m_t + tl.log(z_t)
     else:
         target_idx = extra.to(tl.int32)
+        # Softmax Collapse fix: the target entry's gradient must stay
+        # -exp(-m)/(1+exp(-m)), not round to dp-1 = 0 once the margin is past
+        # the format's precision cliff (arXiv:2610.31642, Eq. 7).
+        x_t = tl.load(logits_ptr + target_idx).cast(tl.float32)
+        g_t = -1.0 / (1.0 + tl.exp(lse_d - x_t))
 
     for i in range(0, n_cols, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
@@ -288,7 +293,7 @@ def loss_backward_kernel(
         ldp = x - lse_d
         dp = tl.exp(ldp)
         if OP == _OP_CE:
-            grad = dp - (offsets == target_idx).to(tl.float32)
+            grad = tl.where(offsets == target_idx, g_t, dp)
         else:
             y = tl.load(targets_ptr + offsets, mask=mask, other=0.0).cast(tl.float32)
             ltp = y - lse_t
