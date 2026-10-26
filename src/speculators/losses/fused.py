@@ -280,11 +280,15 @@ def loss_backward_kernel(
         lse_t = m_t + tl.log(z_t)
     else:
         target_idx = extra.to(tl.int32)
-        # Softmax Collapse fix: the target entry's gradient must stay
-        # -exp(-m)/(1+exp(-m)), not round to dp-1 = 0 once the margin is past
-        # the format's precision cliff (arXiv:2610.31642, Eq. 7).
+        # Target entry of d(CE)/dx is p_t - 1 = -(1 - p_t) = -S_o / (S_o + e^{x_t}), where
+        # S_o = sum over the non-target logits. Written as -1 / (1 + exp(x_t - lse_o)) with
+        # lse_o = log(Z - e^{x_t}) it stays accurate when p_t -> 1, where p_t - 1 would round
+        # to 0 (arXiv:2610.31642, Eq. 7). lse_o comes from the saved stats; when the target is
+        # the max and the others underflow, Z - e^{x_t} is ~0 and the gradient is ~0 as it
+        # should be.
         x_t = tl.load(logits_ptr + target_idx).cast(tl.float32)
-        g_t = -1.0 / (1.0 + tl.exp(lse_d - x_t))
+        rest = z_d - tl.exp(x_t - m_d)
+        g_t = tl.where(rest > 0.0, -1.0 / (1.0 + tl.exp(x_t - m_d - tl.log(rest))), 0.0)
 
     for i in range(0, n_cols, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
