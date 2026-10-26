@@ -479,6 +479,55 @@ def _build_from_config_only(
     return model
 
 
+def _maybe_override_verifier_path(config, cli_path: str | None) -> None:
+    """Use the CLI verifier when the checkpoint's saved local path is missing.
+
+    Candidates trained on another node carry that node's verifier path (e.g.
+    ``/models/glm-5.3-nvfp4``); a missing absolute path would otherwise make
+    ``load_verifier_weights`` try it as a Hub repo id.
+    """
+    spec = getattr(config, "speculators_config", None)
+    saved = getattr(getattr(spec, "verifier", None), "name_or_path", None)
+    if (
+        cli_path
+        and saved
+        and saved != cli_path
+        and saved.startswith("/")
+        and not Path(saved).exists()
+    ):
+        logger.warning(
+            "Checkpoint verifier path %s does not exist here; using %s.",
+            saved,
+            cli_path,
+        )
+        spec.verifier.name_or_path = cli_path
+
+
+def _check_warm_start_keys(model: SpeculatorModel, path: str) -> None:
+    """Allow a warm start to miss only the newly added module keys.
+
+    ``from_pretrained`` loads non-strictly; when architecture flags add modules
+    to a trained checkpoint, verify that every other model key was present.
+    """
+    from safetensors import safe_open  # noqa: PLC0415
+
+    ckpt_keys: set[str] = set()
+    for f in sorted(Path(path).glob("*.safetensors")):
+        with safe_open(str(f), framework="pt") as handle:
+            ckpt_keys.update(handle.keys())
+    new, other = type(model).missing_new_module_keys(model, ckpt_keys)  # type: ignore[attr-defined]
+    if other:
+        raise ValueError(
+            f"Warm start from {path} is missing non-new keys: {sorted(other)[:20]}"
+        )
+    logger.info(
+        "Warm start from %s: %d new module tensors initialized (identity conv / "
+        "zero selector), all other weights loaded.",
+        path,
+        len(new),
+    )
+
+
 def build_draft_model(
     args: argparse.Namespace,
     model_class: type[SpeculatorModel],
@@ -524,13 +573,22 @@ def build_draft_model(
             # __init__ resolves its own default ("sdpa") when it is absent.
             config = model_class.config_class.from_pretrained(args.from_pretrained)
             config.transformer_layer_config._attn_implementation = args.draft_attn_impl  # noqa: SLF001
-            return model_class.from_pretrained(
+            arch_overrides = {}
+            if hasattr(model_class, "arch_kwargs_from_args"):
+                arch_overrides = model_class.arch_kwargs_from_args(vars(args))  # type: ignore[attr-defined]
+            for key, value in arch_overrides.items():
+                setattr(config, key, value)
+            _maybe_override_verifier_path(config, args.verifier_name_or_path)
+            model = model_class.from_pretrained(
                 args.from_pretrained,
                 config=config,
                 t2d=t2d,
                 d2t=d2t,
                 verifier=args.verifier_name_or_path,
             )
+            if arch_overrides:
+                _check_warm_start_keys(model, args.from_pretrained)
+            return model
         return model_class.from_pretrained(
             args.from_pretrained,
             t2d=t2d,

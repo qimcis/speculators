@@ -13,8 +13,23 @@ from speculators.losses import (
 from speculators.model import SpeculatorModel
 from speculators.models.dflash.core import DFlashDraftModel
 from speculators.models.dspark.config import DSparkSpeculatorConfig
-from speculators.models.dspark.metrics import compute_metrics
-from speculators.models.dspark.model_definitions import ConfidenceHead, MarkovHead
+from speculators.models.dflash.config import DFlashSpeculatorConfig
+from speculators.models.dflash2.model_definitions import (
+    GroupedDynamicCausalConv,
+    Qwen3DFlash2DecoderLayer,
+)
+from speculators.models.dspark.metrics import (
+    compute_candidate_metrics,
+    compute_metrics,
+    compute_selector_loss,
+    selector_training_candidates,
+    target_log_normalizer,
+)
+from speculators.models.dspark.model_definitions import (
+    ConfidenceHead,
+    EmbeddingCandidateSelector,
+    MarkovHead,
+)
 from speculators.models.utils import conditional_torch_compile
 
 _DEFAULT_LOSS_CONFIG: LossConfig = {"kl_div": (kl_div_loss, 1.0)}
@@ -34,11 +49,62 @@ class DSparkDraftModel(DFlashDraftModel):
     """
 
     config_class: ClassVar[type[DSparkSpeculatorConfig]] = DSparkSpeculatorConfig  # type: ignore[misc,assignment]
+    _no_split_modules = ["Qwen3DFlashDecoderLayer", "Qwen3DFlash2DecoderLayer"]
+
+    # New modules added on top of a trained DSpark checkpoint. Warm starts may
+    # miss exactly these keys and nothing else (see missing_new_module_keys).
+    NEW_MODULE_KEY_PATTERNS: ClassVar[tuple[str, ...]] = (
+        ".attention_conv.",
+        ".mlp_conv.",
+        "candidate_selector.",
+    )
+
+    def _make_decoder_layer(
+        self, config: DFlashSpeculatorConfig, layer_idx: int
+    ) -> torch.nn.Module:
+        if not getattr(config, "dspark_conv", False):
+            return super()._make_decoder_layer(config, layer_idx)
+        assert isinstance(config, DSparkSpeculatorConfig)  # noqa: S101
+        return Qwen3DFlash2DecoderLayer(
+            config.transformer_layer_config,  # type: ignore[arg-type]
+            layer_idx,
+            block_size=config.block_size,
+            conv_kernel_size=config.dspark_conv_kernel_size,
+            conv_group_size=config.dspark_conv_group_size,
+        )
+
+    def _init_weights(self, module):
+        # HF initializes params missing from a checkpoint through _init_weights,
+        # which would draw the conv's kernel projection from N(0, 0.02) and leave
+        # base_kernel uninitialized; restore the identity init instead.
+        if isinstance(module, GroupedDynamicCausalConv):
+            module.reset_parameters()
+            return
+        if isinstance(module, EmbeddingCandidateSelector):
+            module.reset_parameters(
+                getattr(self.config.transformer_layer_config, "initializer_range", 0.02)
+                or 0.02
+            )
+            return
+        super()._init_weights(module)
 
     def __init__(self, config: DSparkSpeculatorConfig) -> None:
         super().__init__(config=config)
 
         hidden_size = config.transformer_layer_config.hidden_size
+        if config.dspark_conv:
+            for layer_ in self.layers:
+                layer_.reset_convolutions()  # type: ignore[operator]
+
+        self.candidate_selector: EmbeddingCandidateSelector | None = None
+        if config.dspark_selector:
+            if self.use_draft_vocab:
+                raise ValueError("dspark_selector requires the full verifier vocab.")
+            self.candidate_selector = EmbeddingCandidateSelector(
+                hidden_size=hidden_size,
+                rank=config.dspark_selector_rank,
+                top_k=config.dspark_selector_top_k,
+            )
 
         self.markov_head: MarkovHead | None = None
         if config.markov_rank > 0:
@@ -86,12 +152,49 @@ class DSparkDraftModel(DFlashDraftModel):
                 if confidence_head_with_markov_arg is None
                 else confidence_head_with_markov_arg
             ),
+            **cls.arch_kwargs_from_args(kwargs),
         )
 
         model = cls(config=config)
         model.load_vocab_mappings(t2d, d2t)
         model.load_verifier_weights()
         return model
+
+    @staticmethod
+    def arch_kwargs_from_args(kwargs: dict) -> dict:
+        """Conv/selector config fields from training args (only those given)."""
+        out = {}
+        for key in (
+            "dspark_conv",
+            "dspark_conv_kernel_size",
+            "dspark_conv_group_size",
+            "dspark_selector",
+            "dspark_selector_rank",
+            "dspark_selector_top_k",
+        ):
+            if kwargs.get(key) is not None:
+                out[key] = kwargs[key]
+        return out
+
+    @classmethod
+    def missing_new_module_keys(
+        cls, model: "DSparkDraftModel", checkpoint_keys: set[str]
+    ) -> tuple[list[str], list[str]]:
+        """Split the model keys absent from a checkpoint into (new, unexpected).
+
+        ``new`` are conv/selector keys that a warm start legitimately lacks;
+        ``unexpected`` is anything else that is missing (must be empty).
+        """
+        ignored = set(model._keys_to_ignore_on_load_missing)  # noqa: SLF001
+        new, other = [], []
+        for key in model.state_dict():
+            if key in checkpoint_keys or key in ignored:
+                continue
+            if any(p in f".{key}" for p in cls.NEW_MODULE_KEY_PATTERNS):
+                new.append(key)
+            else:
+                other.append(key)
+        return new, other
 
     @staticmethod
     def get_trainer_kwargs(**kwargs) -> tuple[dict, dict]:
@@ -114,6 +217,9 @@ class DSparkDraftModel(DFlashDraftModel):
             "confidence_head_alpha": confidence_head_alpha,
             "per_position_loss_weight": per_position_loss_weight,
             "dpace_alpha": dpace_alpha,
+            "selector_ce_alpha": kwargs.get("dspark_selector_ce_alpha", 0.1),
+            "selector_tv_alpha": kwargs.get("dspark_selector_tv_alpha", 0.9),
+            "candidate_metrics_top_k": kwargs.get("dspark_candidate_metrics_top_k", 0),
         }
         return dict(shared), dict(shared)
 
@@ -133,6 +239,9 @@ class DSparkDraftModel(DFlashDraftModel):
         confidence_head_alpha: float = 1.0,
         per_position_loss_weight: str = "fixed-exp-decay",
         dpace_alpha: float = 0.5,
+        selector_ce_alpha: float = 0.1,
+        selector_tv_alpha: float = 0.9,
+        candidate_metrics_top_k: int = 0,
         **kwargs,
     ):
         hidden, logits, targets, aligned_loss_mask, anchored_block_indices = (
@@ -170,6 +279,7 @@ class DSparkDraftModel(DFlashDraftModel):
 
         confidence_logits = None
         prev_emb = None
+        unary_logits = logits  # backbone-only logits, before the Markov bias
         if self.markov_head is not None:
             prev_emb = self.markov_head.prev_embeddings(prev_token_ids)
             markov_bias = self.markov_head.block_bias(
@@ -209,4 +319,71 @@ class DSparkDraftModel(DFlashDraftModel):
             dpace_alpha=dpace_alpha,
             sample_from_anchor=self.config.sample_from_anchor,
         )
+
+        top_k = (
+            self.candidate_selector.top_k
+            if self.candidate_selector is not None
+            else candidate_metrics_top_k
+        )
+        if top_k > 0:
+            # Candidates are the backbone's unary top-K (the set vLLM's top-k
+            # DSpark path and DFlash2 both rerank); scores add the Markov bias
+            # and, with the selector, the low-rank transition term.
+            with torch.no_grad():
+                target_ids = targets.argmax(dim=-1)
+                candidate_ids = unary_logits.detach().topk(top_k, dim=-1).indices
+                train_ids, target_positions, contains_target = (
+                    selector_training_candidates(candidate_ids, target_ids)
+                )
+                log_z = target_log_normalizer(targets)
+            candidate_logits = logits.gather(-1, train_ids)
+            if self.candidate_selector is not None:
+                pred_table, succ_table = self.candidate_selector.tables(
+                    self.embed_tokens.weight
+                )
+                transition = self.candidate_selector.transition_scores(
+                    pred_table=pred_table,
+                    succ_table=succ_table,
+                    hidden_states=hidden,
+                    predecessor_ids=prev_token_ids.reshape(1, -1),
+                    candidate_ids=train_ids,
+                )
+                candidate_logits = candidate_logits + transition.to(
+                    candidate_logits.dtype
+                )
+                sel_loss, sel_metrics = compute_selector_loss(
+                    candidate_logits,
+                    train_ids,
+                    target_positions,
+                    targets,
+                    aligned_loss_mask,
+                    self.block_size,
+                    gamma=gamma,
+                    ce_alpha=selector_ce_alpha,
+                    tv_alpha=selector_tv_alpha,
+                    sample_from_anchor=self.config.sample_from_anchor,
+                    log_z=log_z,
+                )
+                loss = loss + sel_loss
+                metrics.update(sel_metrics)
+                metrics["loss_sum"] = loss.detach().clone()
+            metrics.update(
+                compute_candidate_metrics(
+                    candidate_logits.detach(),
+                    train_ids,
+                    contains_target,
+                    target_ids,
+                    targets,
+                    aligned_loss_mask,
+                    self.block_size,
+                    top_k=top_k,
+                    sample_from_anchor=self.config.sample_from_anchor,
+                    corrected_contains=logits.detach()
+                    .topk(top_k, dim=-1)
+                    .indices.eq(target_ids.unsqueeze(-1))
+                    .any(dim=-1),
+                    unary_top1=candidate_ids[..., 0].eq(target_ids),
+                    log_z=log_z,
+                )
+            )
         return None, loss, metrics

@@ -5,6 +5,7 @@ from torch import nn
 
 __all__ = [
     "ConfidenceHead",
+    "EmbeddingCandidateSelector",
     "MarkovHead",
 ]
 
@@ -90,3 +91,54 @@ class ConfidenceHead(nn.Module):
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.proj(features).squeeze(-1)
+
+
+class EmbeddingCandidateSelector(nn.Module):
+    """Low-rank transition scorer over top-K candidates (DFlash2-style).
+
+    ``score(a, h, b) = <A(a) * H(h), B(b)>`` with the token factors linear in the
+    frozen target input embedding: ``A = Emb @ W_A^T + b_A`` and
+    ``B = Emb @ W_B^T + b_B``. ``H`` projects the draft hidden state. Unlike the
+    free ``V x r`` codebooks upstream trains, this has ~3 * d * r params
+    (inco's GLM-5.3 codebooks fit this form with R^2 0.97-0.99).
+
+    ``succ_proj`` is zero-initialized, so a fresh selector adds exactly zero and
+    the draft distribution is unchanged at warm start.
+    """
+
+    def __init__(self, *, hidden_size: int, rank: int, top_k: int) -> None:
+        super().__init__()
+        self.rank = rank
+        self.top_k = top_k
+        self.pred_proj = nn.Linear(hidden_size, rank, bias=True)
+        self.succ_proj = nn.Linear(hidden_size, rank, bias=True)
+        self.hidden_projection = nn.Linear(hidden_size, rank, bias=False)
+        self.reset_parameters()
+
+    def reset_parameters(self, std: float = 0.02) -> None:
+        with torch.no_grad():
+            self.pred_proj.weight.normal_(0.0, std)
+            self.pred_proj.bias.zero_()
+            self.hidden_projection.weight.normal_(0.0, std)
+            self.succ_proj.weight.zero_()
+            self.succ_proj.bias.zero_()
+
+    def tables(self, embed_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Materialize the [V, r] predecessor/successor codebooks."""
+        emb = embed_weight.detach().to(self.pred_proj.weight.dtype)
+        return self.pred_proj(emb), self.succ_proj(emb)
+
+    def transition_scores(
+        self,
+        *,
+        pred_table: torch.Tensor,  # [V, r]
+        succ_table: torch.Tensor,  # [V, r]
+        hidden_states: torch.Tensor,  # [..., d]
+        predecessor_ids: torch.Tensor,  # [...]
+        candidate_ids: torch.Tensor,  # [..., K]
+    ) -> torch.Tensor:
+        """Teacher-forced edge scores for one predecessor per position."""
+        hid = self.hidden_projection(hidden_states.to(self.hidden_projection.weight.dtype))
+        context = pred_table[predecessor_ids.long()] * hid.to(pred_table.dtype)
+        successors = succ_table[candidate_ids.long()]
+        return (context.unsqueeze(-2) * successors).sum(dim=-1)

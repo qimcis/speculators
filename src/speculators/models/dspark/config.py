@@ -65,3 +65,27 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             "hidden state as the confidence-head input."
         ),
     )
+
+    # DFlash2-style intra-block convolution in every draft layer.
+    dspark_conv: bool = Field(
+        default=False,
+        description=(
+            "Wrap attention and MLP of every draft layer in DFlash2's grouped "
+            "dynamic causal convolution (identity-initialized)."
+        ),
+    )
+    dspark_conv_kernel_size: int = Field(default=2, ge=1)
+    dspark_conv_group_size: int = Field(default=16, ge=1)
+
+    # Top-K candidate selector on top of the Markov-corrected logits.
+    dspark_selector: bool = Field(
+        default=False,
+        description=(
+            "Keep the top-K of the Markov-corrected logits at each position and "
+            "add a low-rank transition score <A(prev) * H(h), B(cand)>, with "
+            "A/B linear in the frozen target input embedding. "
+            "The draft samples from softmax over the K rescored candidates."
+        ),
+    )
+    dspark_selector_rank: int = Field(default=256, ge=1)
+    dspark_selector_top_k: int = Field(default=16, ge=1)

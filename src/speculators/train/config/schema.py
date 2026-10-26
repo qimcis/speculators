@@ -530,6 +530,41 @@ class DSparkArgs(_Group):
     confidence_head_alpha: float = Field(
         default=1.0, description="DSpark: weight of the confidence-head BCE term."
     )
+    dspark_conv: bool | None = Field(
+        default=None,
+        description="DSpark: add DFlash2's identity-initialized 2-tap grouped "
+        "dynamic causal conv around attention and MLP in every draft layer. With "
+        "--from-pretrained this overrides the checkpoint config (warm start).",
+    )
+    dspark_conv_kernel_size: int | None = Field(
+        default=None, description="DSpark conv taps (default 2)."
+    )
+    dspark_conv_group_size: int | None = Field(
+        default=None, description="DSpark conv channels per dynamic group (16)."
+    )
+    dspark_selector: bool | None = Field(
+        default=None,
+        description="DSpark: add the top-K candidate selector (low-rank "
+        "transition over frozen target embeddings). Overrides the checkpoint "
+        "config with --from-pretrained.",
+    )
+    dspark_selector_rank: int | None = Field(
+        default=None, description="DSpark selector rank (default 256)."
+    )
+    dspark_selector_top_k: int | None = Field(
+        default=None, description="DSpark selector candidates per position (16)."
+    )
+    dspark_selector_ce_alpha: float = Field(
+        default=0.1, description="DSpark selector: weight of the K-way hard CE."
+    )
+    dspark_selector_tv_alpha: float = Field(
+        default=0.9, description="DSpark selector: weight of the K-way TV term."
+    )
+    dspark_candidate_metrics_top_k: int = Field(
+        default=0,
+        description="DSpark: log top-K candidate headroom metrics (recall@K, "
+        "oracle AL) without a selector; 0 disables. Implied by --dspark-selector.",
+    )
 
 
 class PEagleArgs(_Group):
