@@ -2,8 +2,13 @@
 DFlash and DSpark can easily OOM with eager loss implementations."""
 
 import math
+import os
 
 import torch
+
+from speculators.losses import fixed as _fixed
+
+_FIXED_SOFTMAX = os.environ.get("SPEC_FIXED_SOFTMAX") == "1"
 
 _NLA_EPS = 1e-5
 
@@ -105,12 +110,17 @@ def ce_loss(
     batch_size, seq_len, draft_vocab_size = logits.shape
     target_ids = torch.argmax(targets, dim=-1)  # shape: [1, seq_len]
 
-    elementwise_loss = torch.nn.functional.cross_entropy(
-        logits.reshape(-1, draft_vocab_size),
-        target_ids.reshape(-1),
-        reduction="none",
-        ignore_index=-100,
-    ).reshape(batch_size, seq_len)
+    if _FIXED_SOFTMAX:
+        elementwise_loss = _fixed.cross_entropy(
+            logits.reshape(-1, draft_vocab_size).float(), target_ids.reshape(-1)
+        ).reshape(batch_size, seq_len)
+    else:
+        elementwise_loss = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, draft_vocab_size),
+            target_ids.reshape(-1),
+            reduction="none",
+            ignore_index=-100,
+        ).reshape(batch_size, seq_len)
 
     return elementwise_loss  # noqa: RET504
 
@@ -134,8 +144,12 @@ def tv_loss(
     Returns:
         Per-position TV distance with shape [1, seq_len].
     """
-    draft_p = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float32)
-    target_p = torch.nn.functional.softmax(targets, dim=-1, dtype=torch.float32)
+    if _FIXED_SOFTMAX:
+        draft_p = _fixed.softmax(logits.float())
+        target_p = _fixed.softmax(targets.float())
+    else:
+        draft_p = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float32)
+        target_p = torch.nn.functional.softmax(targets, dim=-1, dtype=torch.float32)
     overlap = torch.minimum(draft_p, target_p).sum(dim=-1)  # shape: [1, seq_len]
     elementwise_loss = 1.0 - overlap
 
@@ -163,8 +177,12 @@ def neg_log_acceptance_loss(
     Returns:
         Per-position negative log-acceptance with shape [1, seq_len].
     """
-    draft_p = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float32)
-    target_p = torch.nn.functional.softmax(targets, dim=-1, dtype=torch.float32)
+    if _FIXED_SOFTMAX:
+        draft_p = _fixed.softmax(logits.float())
+        target_p = _fixed.softmax(targets.float())
+    else:
+        draft_p = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float32)
+        target_p = torch.nn.functional.softmax(targets, dim=-1, dtype=torch.float32)
     overlap = torch.minimum(draft_p, target_p).sum(dim=-1)  # alpha, shape: [1, seq_len]
     elementwise_loss = -torch.log(overlap.clamp_min(_NLA_EPS))
 
@@ -202,8 +220,12 @@ def lk_hybrid_loss(
     Returns:
         Per-position hybrid loss with shape [1, seq_len].
     """
-    draft_p = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float32)
-    target_p = torch.nn.functional.softmax(targets, dim=-1, dtype=torch.float32)
+    if _FIXED_SOFTMAX:
+        draft_p = _fixed.softmax(logits.float())
+        target_p = _fixed.softmax(targets.float())
+    else:
+        draft_p = torch.nn.functional.softmax(logits, dim=-1, dtype=torch.float32)
+        target_p = torch.nn.functional.softmax(targets, dim=-1, dtype=torch.float32)
     overlap = torch.minimum(draft_p, target_p).sum(dim=-1)  # alpha, shape: [1, seq_len]
     tv = 1.0 - overlap
     kl = kl_div_loss(logits, targets)  # reuse existing KL, shape: [1, seq_len]
