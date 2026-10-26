@@ -554,6 +554,12 @@ class DSparkArgs(_Group):
     dspark_selector_top_k: int | None = Field(
         default=None, description="DSpark selector candidates per position (16)."
     )
+    dspark_selector_succ_basis: Literal["lm_head", "embed"] | None = Field(
+        default=None,
+        description="DSpark selector: frozen target matrix the successor factor "
+        "is linear in (default lm_head; predecessor always uses the input "
+        "embedding).",
+    )
     dspark_selector_ce_alpha: float = Field(
         default=0.1, description="DSpark selector: weight of the K-way hard CE."
     )

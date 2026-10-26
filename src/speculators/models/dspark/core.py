@@ -171,6 +171,7 @@ class DSparkDraftModel(DFlashDraftModel):
             "dspark_selector",
             "dspark_selector_rank",
             "dspark_selector_top_k",
+            "dspark_selector_succ_basis",
         ):
             if kwargs.get(key) is not None:
                 out[key] = kwargs[key]
@@ -339,7 +340,10 @@ class DSparkDraftModel(DFlashDraftModel):
             candidate_logits = logits.gather(-1, train_ids)
             if self.candidate_selector is not None:
                 pred_table, succ_table = self.candidate_selector.tables(
-                    self.embed_tokens.weight
+                    self.embed_tokens.weight,
+                    self.lm_head.weight
+                    if self.config.dspark_selector_succ_basis == "lm_head"
+                    else None,
                 )
                 transition = self.candidate_selector.transition_scores(
                     pred_table=pred_table,

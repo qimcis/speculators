@@ -83,9 +83,17 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         description=(
             "Keep the top-K of the Markov-corrected logits at each position and "
             "add a low-rank transition score <A(prev) * H(h), B(cand)>, with "
-            "A/B linear in the frozen target input embedding. "
+            "A linear in the frozen target input embedding and B in the frozen target lm_head. "
             "The draft samples from softmax over the K rescored candidates."
         ),
     )
     dspark_selector_rank: int = Field(default=256, ge=1)
     dspark_selector_top_k: int = Field(default=16, ge=1)
+    dspark_selector_succ_basis: Literal["lm_head", "embed"] = Field(
+        default="lm_head",
+        description=(
+            "Frozen target matrix the successor factor B is linear in. inco's "
+            "GLM-5.3-DFlash2 codebooks: predecessor ~ input embedding (R^2 0.988), "
+            "successor ~ lm_head (R^2 0.987; ~ input embedding only 0.60)."
+        ),
+    )

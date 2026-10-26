@@ -96,11 +96,13 @@ class ConfidenceHead(nn.Module):
 class EmbeddingCandidateSelector(nn.Module):
     """Low-rank transition scorer over top-K candidates (DFlash2-style).
 
-    ``score(a, h, b) = <A(a) * H(h), B(b)>`` with the token factors linear in the
-    frozen target input embedding: ``A = Emb @ W_A^T + b_A`` and
-    ``B = Emb @ W_B^T + b_B``. ``H`` projects the draft hidden state. Unlike the
-    free ``V x r`` codebooks upstream trains, this has ~3 * d * r params
-    (inco's GLM-5.3 codebooks fit this form with R^2 0.97-0.99).
+    ``score(a, h, b) = <A(a) * H(h), B(b)>`` with the token factors linear in
+    frozen target matrices: ``A = Emb @ W_A^T + b_A`` (input embedding) and
+    ``B = M @ W_B^T + b_B`` where ``M`` is the target lm_head (default) or the
+    input embedding. ``H`` projects the draft hidden state. Unlike the free
+    ``V x r`` codebooks upstream trains, this has ~3 * d * r params. inco's
+    GLM-5.3-DFlash2 codebooks fit pred ~ Emb (held-out R^2 0.988) and
+    succ ~ lm_head (0.987; succ ~ Emb only 0.60).
 
     ``succ_proj`` is zero-initialized, so a fresh selector adds exactly zero and
     the draft distribution is unchanged at warm start.
@@ -123,10 +125,14 @@ class EmbeddingCandidateSelector(nn.Module):
             self.succ_proj.weight.zero_()
             self.succ_proj.bias.zero_()
 
-    def tables(self, embed_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def tables(
+        self, embed_weight: torch.Tensor, succ_weight: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Materialize the [V, r] predecessor/successor codebooks."""
-        emb = embed_weight.detach().to(self.pred_proj.weight.dtype)
-        return self.pred_proj(emb), self.succ_proj(emb)
+        dtype = self.pred_proj.weight.dtype
+        emb = embed_weight.detach().to(dtype)
+        succ = emb if succ_weight is None else succ_weight.detach().to(dtype)
+        return self.pred_proj(emb), self.succ_proj(succ)
 
     def transition_scores(
         self,
