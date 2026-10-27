@@ -99,6 +99,14 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     )
     dspark_selector_rank: int = Field(default=256, ge=1)
     dspark_selector_top_k: int = Field(default=16, ge=1)
+    dspark_selector_candidates: Literal["corrected", "unary"] = Field(
+        default="corrected",
+        description=(
+            "Candidate set the selector reranks: top-K of the Markov-corrected "
+            "logits (avg50 held-out Recall@16 at pos 3: 0.85) or of the backbone "
+            "unary logits (0.70; DFlash2 / vLLM dspark_draft_topk style)."
+        ),
+    )
     dspark_selector_succ_basis: Literal["lm_head", "embed"] = Field(
         default="lm_head",
         description=(

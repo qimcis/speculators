@@ -355,12 +355,17 @@ class DSparkDraftModel(DFlashDraftModel):
             else candidate_metrics_top_k
         )
         if top_k > 0:
-            # Candidates are the backbone's unary top-K (the set vLLM's top-k
-            # DSpark path and DFlash2 both rerank); scores add the Markov bias
-            # and, with the selector, the low-rank transition term.
+            # Candidates: top-K of the Markov-corrected logits (default) or of
+            # the backbone's unary logits; scores are the corrected logits plus,
+            # with the selector, the low-rank transition term.
             with torch.no_grad():
                 target_ids = targets.argmax(dim=-1)
-                candidate_ids = unary_logits.detach().topk(top_k, dim=-1).indices
+                cand_source = (
+                    logits
+                    if self.config.dspark_selector_candidates == "corrected"
+                    else unary_logits
+                )
+                candidate_ids = cand_source.detach().topk(top_k, dim=-1).indices
                 train_ids, target_positions, contains_target = (
                     selector_training_candidates(candidate_ids, target_ids)
                 )
@@ -414,7 +419,7 @@ class DSparkDraftModel(DFlashDraftModel):
                     .topk(top_k, dim=-1)
                     .indices.eq(target_ids.unsqueeze(-1))
                     .any(dim=-1),
-                    unary_top1=candidate_ids[..., 0].eq(target_ids),
+                    unary_top1=unary_logits.detach().argmax(dim=-1).eq(target_ids),
                     log_z=log_z,
                 )
             )

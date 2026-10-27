@@ -571,6 +571,11 @@ class DSparkArgs(_Group):
         "is linear in (default lm_head; predecessor always uses the input "
         "embedding).",
     )
+    dspark_selector_candidates: Literal["corrected", "unary"] | None = Field(
+        default=None,
+        description="DSpark selector: rerank the top-K of the Markov-corrected "
+        "logits (default) or of the backbone unary logits.",
+    )
     dspark_selector_ce_alpha: float = Field(
         default=0.1, description="DSpark selector: weight of the K-way hard CE."
     )
