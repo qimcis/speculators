@@ -62,6 +62,7 @@ def _setup_dataloader(
     prefetch_factor: int | None = 4,
     preprocess: Callable[[BatchType], BatchType] | None = None,
     max_batches: int | None = None,
+    carryover: dict | None = None,
 ) -> DataLoader:
     batch_sampler = MultipackDistributedBatchSamplerV2(
         batch_max_length=total_seq_len,
@@ -71,19 +72,37 @@ def _setup_dataloader(
         max_batches=max_batches,
     )
     use_workers = num_workers > 0
+    collate_kwargs = dict(
+        num_target_layers=num_target_layers,
+        dtype=dataset.hidden_states_dtype,
+        preprocess=preprocess,
+    )
+    if carryover is not None:
+        from speculators.train.carryover import (  # noqa: PLC0415
+            CarryoverCollateFn,
+            CarryoverDataset,
+        )
+
+        dataset = CarryoverDataset(
+            dataset, carryover["data"], block_size=carryover["block_size"]
+        )
+        collate_fn: CollateFn = CarryoverCollateFn(
+            total_seq_len,
+            hidden_size,
+            max_anchors=carryover["max_anchors"],
+            block_size=carryover["block_size"],
+            max_carry=carryover["max_carry"],
+            **collate_kwargs,
+        )
+    else:
+        collate_fn = CollateFn(total_seq_len, hidden_size, **collate_kwargs)
     return DataLoader(
         dataset,
         batch_sampler=batch_sampler,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor if use_workers else None,
         pin_memory=True,
-        collate_fn=CollateFn(
-            total_seq_len,
-            hidden_size,
-            num_target_layers=num_target_layers,
-            dtype=dataset.hidden_states_dtype,
-            preprocess=preprocess,
-        ),
+        collate_fn=collate_fn,
         persistent_workers=use_workers,
         multiprocessing_context="spawn" if use_workers else None,
         worker_init_fn=_worker_init_fn if use_workers else None,
@@ -111,6 +130,7 @@ def create_train_val_loaders(
     preprocess: Callable[[BatchType], BatchType] | None,
     train_data_ratio: float = 0.9,
     max_train_batches: int | None = None,
+    carryover: dict | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """Create training and validation DataLoaders.
 
@@ -165,6 +185,7 @@ def create_train_val_loaders(
         prefetch_factor=prefetch_factor,
         preprocess=preprocess,
         max_batches=max_train_batches,
+        carryover=carryover,
     )
     val_loader = _setup_dataloader(
         val_dataset,
@@ -174,6 +195,7 @@ def create_train_val_loaders(
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
         preprocess=preprocess,
+        carryover=carryover,
     )
 
     return train_loader, val_loader

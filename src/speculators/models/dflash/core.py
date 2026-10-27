@@ -14,7 +14,10 @@ from speculators.losses import LossConfig, resolve_loss_config
 from speculators.model import DraftVocabMixin, SpeculatorModel
 from speculators.models.attention import create_float_mask
 from speculators.models.dflash import DFlashSpeculatorConfig
-from speculators.models.dflash.attention import create_anchor_block_mask_mod
+from speculators.models.dflash.attention import (
+    create_anchor_block_carry_mask_mod,
+    create_anchor_block_mask_mod,
+)
 from speculators.models.dflash.metrics import compute_metrics
 from speculators.models.dflash.model_definitions import Qwen3DFlashDecoderLayer
 from speculators.models.dflash.utils import (
@@ -325,15 +328,27 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         device: torch.device,
         sliding_window: int | None = None,
         sliding_window_non_causal: bool = False,
+        carry_owner: torch.Tensor | None = None,
     ):
-        mask_mod, q_len, kv_len = create_anchor_block_mask_mod(
-            document_ids=document_ids.squeeze(0).to(device),
-            total_seq_len=total_seq_len,
-            anchor_positions=anchor_positions,
-            block_size=self.block_size,
-            sliding_window=sliding_window,
-            sliding_window_non_causal=sliding_window_non_causal,
-        )
+        if carry_owner is None:
+            mask_mod, q_len, kv_len = create_anchor_block_mask_mod(
+                document_ids=document_ids.squeeze(0).to(device),
+                total_seq_len=total_seq_len,
+                anchor_positions=anchor_positions,
+                block_size=self.block_size,
+                sliding_window=sliding_window,
+                sliding_window_non_causal=sliding_window_non_causal,
+            )
+        else:
+            mask_mod, q_len, kv_len = create_anchor_block_carry_mask_mod(
+                document_ids=document_ids.squeeze(0).to(device),
+                total_seq_len=total_seq_len,
+                anchor_positions=anchor_positions,
+                block_size=self.block_size,
+                carry_owner=carry_owner,
+                sliding_window=sliding_window,
+                sliding_window_non_causal=sliding_window_non_causal,
+            )
         return self._create_mask_fn(
             mask_mod,
             B=None,
@@ -344,12 +359,25 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         )
 
     @torch.compiler.disable
-    def _build_attention_mask(self, loss_mask, max_anchors, document_ids, device):
+    def _build_attention_mask(
+        self,
+        loss_mask,
+        max_anchors,
+        document_ids,
+        device,
+        fixed_anchors=None,
+        carry_owner=None,
+    ):
         total_seq_len = loss_mask.shape[1]
 
-        anchor_positions, anchor_valid = select_anchors(
-            loss_mask, max_anchors, self.block_size
-        )
+        if fixed_anchors is None:
+            anchor_positions, anchor_valid = select_anchors(
+                loss_mask, max_anchors, self.block_size
+            )
+        else:
+            # Carryover: the batch supplies its (shifted) anchors; -1 pads.
+            anchor_valid = fixed_anchors >= 0
+            anchor_positions = torch.where(anchor_valid, fixed_anchors, 0)
 
         full_attn_mask = None
         if self.uses_full_attn:
@@ -359,6 +387,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                 anchor_positions=anchor_positions,
                 device=device,
                 sliding_window=None,
+                carry_owner=carry_owner,
             )
 
         sliding_window_attn_mask = None
@@ -370,6 +399,7 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
                 device=device,
                 sliding_window=self.sliding_window,
                 sliding_window_non_causal=self.sliding_window_non_causal,
+                carry_owner=carry_owner,
             )
 
         return full_attn_mask, sliding_window_attn_mask, anchor_positions, anchor_valid
@@ -382,9 +412,17 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         verifier_last_hidden_states: torch.Tensor,  # [1, total_seq_len, hidden_size]
         document_ids: torch.Tensor,  # [1, total_seq_len]
         position_ids: torch.Tensor | None = None,  # [1, total_seq_len]
+        fixed_anchors: torch.Tensor | None = None,  # [max_anchors], -1 = pad
+        carry: dict[str, torch.Tensor] | None = None,
         **kwargs,
     ):
         """Run the anchored-block draft transformer up to the draft logits.
+
+        ``fixed_anchors`` replaces random anchor sampling. ``carry`` (Carryover,
+        arXiv 2609.14717) appends rejected-suffix target states as extra context
+        that only their owning block reads: ``hidden_states`` [1, C, L*H],
+        ``positions`` [C] (absolute), ``owner`` [C] (anchor index, -1 = pad) and
+        ``embedding`` [H], added after ``fc`` and before ``hidden_norm``.
 
         Returns ``(hidden, logits, targets, aligned_loss_mask,
         anchored_block_indices)``. DSpark reuses this and adds its Markov and
@@ -400,7 +438,14 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
             ).unsqueeze(0)
 
         full_attn_mask, sliding_window_attn_mask, anchor_positions, anchor_valid = (
-            self._build_attention_mask(loss_mask, num_anchors, document_ids, device)
+            self._build_attention_mask(
+                loss_mask,
+                num_anchors,
+                document_ids,
+                device,
+                fixed_anchors=fixed_anchors,
+                carry_owner=None if carry is None else carry["owner"],
+            )
         )
 
         mask_tokens_size = num_anchors * self.block_size
@@ -416,12 +461,21 @@ class DFlashDraftModel(DraftVocabMixin, SpeculatorModel):
         # shape: [1, num_anchors*block_size, hidden_size]
 
         fc_output = self.fc(hidden_states)
+        if carry is not None:
+            carry_fc = self.fc(carry["hidden_states"].to(fc_output.dtype))
+            carry_fc = carry_fc + carry["embedding"].to(carry_fc.dtype)
+            fc_output = torch.cat([fc_output, carry_fc], dim=1)
         fc_output = self.hidden_norm(fc_output)
-        # shape: [1, total_seq_len, hidden_size]
+        # shape: [1, total_seq_len (+ C), hidden_size]
 
         mask_position_ids = get_base_indices_for_anchored_blocks(
             position_ids[0, anchor_positions], self.block_size
         )
+        if carry is not None:
+            position_ids = torch.cat(
+                [position_ids, carry["positions"].view(1, -1).to(position_ids.dtype)],
+                dim=1,
+            )
         position_ids = torch.cat([position_ids, mask_position_ids.unsqueeze(0)], dim=1)
         # shape: [1, total_seq_len + num_anchors*block_size]
 

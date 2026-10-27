@@ -57,6 +57,7 @@ class DSparkDraftModel(DFlashDraftModel):
         ".attention_conv.",
         ".mlp_conv.",
         "candidate_selector.",
+        "carry_embedding",
     )
 
     def _make_decoder_layer(
@@ -105,6 +106,12 @@ class DSparkDraftModel(DFlashDraftModel):
                 rank=config.dspark_selector_rank,
                 top_k=config.dspark_selector_top_k,
             )
+
+        # Carryover embedding, in fused-feature space (after fc, before hidden_norm);
+        # zero-initialized so a warm start begins as "no explicit discrimination".
+        self.carry_embedding: torch.nn.Parameter | None = None
+        if getattr(config, "carryover", False):
+            self.carry_embedding = torch.nn.Parameter(torch.zeros(hidden_size))
 
         self.markov_head: MarkovHead | None = None
         if config.markov_rank > 0:
@@ -172,6 +179,7 @@ class DSparkDraftModel(DFlashDraftModel):
             "dspark_selector_rank",
             "dspark_selector_top_k",
             "dspark_selector_succ_basis",
+            "carryover",
         ):
             if kwargs.get(key) is not None:
                 out[key] = kwargs[key]
@@ -243,8 +251,26 @@ class DSparkDraftModel(DFlashDraftModel):
         selector_ce_alpha: float = 0.1,
         selector_tv_alpha: float = 0.9,
         candidate_metrics_top_k: int = 0,
+        carry_anchors: torch.Tensor | None = None,  # [1, max_anchors], -1 = pad
+        carry_hidden_states: torch.Tensor | None = None,  # [1, C, L*H]
+        carry_positions: torch.Tensor | None = None,  # [1, C]
+        carry_owner: torch.Tensor | None = None,  # [1, C], -1 = pad
         **kwargs,
     ):
+        fixed_anchors = None
+        carry = None
+        if carry_anchors is not None:
+            # Carryover batch (speculators.train.carryover): fixed shifted anchors,
+            # plus each block's rejected-suffix states of the first draft.
+            fixed_anchors = carry_anchors.view(-1)
+            max_anchors = fixed_anchors.numel()
+            if self.carry_embedding is not None and carry_owner is not None:
+                carry = {
+                    "hidden_states": carry_hidden_states,
+                    "positions": carry_positions.view(-1),
+                    "owner": carry_owner.view(-1),
+                    "embedding": self.carry_embedding,
+                }
         hidden, logits, targets, aligned_loss_mask, anchored_block_indices = (
             self._backbone_forward(
                 hidden_states,
@@ -254,6 +280,8 @@ class DSparkDraftModel(DFlashDraftModel):
                 document_ids,
                 position_ids,
                 max_anchors=max_anchors,
+                fixed_anchors=fixed_anchors,
+                carry=carry,
                 **kwargs,
             )
         )

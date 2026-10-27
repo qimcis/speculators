@@ -792,6 +792,17 @@ def main(cfg: TrainConfig):  # noqa: C901
         prefetch_factor=args.prefetch_factor,
         preprocess=preprocess,
         train_data_ratio=args.train_data_ratio,
+        carryover=(
+            {
+                "data": args.carryover_data,
+                "block_size": args.block_size,
+                "max_anchors": args.max_anchors,
+                # Rejected rows per anchor are at most the first draft's length.
+                "max_carry": 8,
+            }
+            if getattr(args, "carryover_data", None)
+            else None
+        ),
     )
 
     # Get trainer kwargs from model class

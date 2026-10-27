@@ -87,6 +87,16 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
             "The draft samples from softmax over the K rescored candidates."
         ),
     )
+    # Carryover (arXiv 2609.14717): rejected-suffix target states as one-round
+    # extra draft context, marked by a learned embedding added after ``fc``.
+    carryover: bool = Field(
+        default=False,
+        description=(
+            "Train/serve with Carryover: rejected-suffix target states of the "
+            "previous verification are extra context for the next draft, marked "
+            "by the learned carry_embedding (vLLM: draft config 'carryover')."
+        ),
+    )
     dspark_selector_rank: int = Field(default=256, ge=1)
     dspark_selector_top_k: int = Field(default=16, ge=1)
     dspark_selector_succ_basis: Literal["lm_head", "embed"] = Field(

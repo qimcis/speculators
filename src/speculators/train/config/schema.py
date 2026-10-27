@@ -548,6 +548,17 @@ class DSparkArgs(_Group):
         "transition over frozen target embeddings). Overrides the checkpoint "
         "config with --from-pretrained.",
     )
+    carryover: bool | None = Field(
+        default=None,
+        description="DSpark Carryover (arXiv 2609.14717): add the carry embedding "
+        "and train on --carryover-data (shifted anchors + rejected-suffix states). "
+        "Overrides the checkpoint config with --from-pretrained.",
+    )
+    carryover_data: str | None = Field(
+        default=None,
+        description="Carryover transitions directory (scripts/carryover/*); each "
+        "row's anchors, accept lengths and rejected-suffix states.",
+    )
     dspark_selector_rank: int | None = Field(
         default=None, description="DSpark selector rank (default 256)."
     )

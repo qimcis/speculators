@@ -98,3 +98,46 @@ def create_anchor_block_mask_mod(
         return same
 
     return or_masks(base_prefix_mod, same_block_mod), q_len, kv_len
+
+
+def create_anchor_block_carry_mask_mod(
+    document_ids: torch.Tensor,
+    total_seq_len: int,
+    anchor_positions: torch.Tensor,
+    block_size: int,
+    carry_owner: torch.Tensor,
+    sliding_window: int | None = None,
+    sliding_window_non_causal: bool = False,
+):
+    """Anchor-block mask with a Carryover segment (arXiv 2609.14717).
+
+    KV side: ``[ packed sequence (T) | carried rows (C) | anchor blocks ]``. Carried
+    rows are rejected-suffix target states that only the query block that owns them
+    may read (``carry_owner[c]`` = anchor index, -1 for padding). Base and in-block
+    rules are those of :func:`create_anchor_block_mask_mod`.
+    """
+    base_mod, q_len, _ = create_anchor_block_mask_mod(
+        document_ids=document_ids,
+        total_seq_len=total_seq_len,
+        anchor_positions=anchor_positions,
+        block_size=block_size,
+        sliding_window=sliding_window,
+        sliding_window_non_causal=sliding_window_non_causal,
+    )
+    carry_owner = carry_owner.to(device=document_ids.device, dtype=torch.long)
+    num_carry = carry_owner.numel()
+    kv_len = total_seq_len + num_carry + q_len
+
+    def shifted_mod(b, h, q_idx, kv_idx):
+        # Remove the carry segment so the base mask sees its usual KV layout.
+        is_block = kv_idx >= total_seq_len + num_carry
+        kv_base = torch.where(is_block, kv_idx - num_carry, kv_idx)
+        is_carry = (kv_idx >= total_seq_len) & ~is_block
+        return base_mod(b, h, q_idx, kv_base) & ~is_carry
+
+    def carry_mod(_b, _h, q_idx, kv_idx):
+        is_carry = (kv_idx >= total_seq_len) & (kv_idx < total_seq_len + num_carry)
+        c = torch.clamp(kv_idx - total_seq_len, 0, max(num_carry - 1, 0))
+        return is_carry & (carry_owner[c] == q_idx // block_size)
+
+    return or_masks(shifted_mod, carry_mod), q_len, kv_len
