@@ -503,6 +503,16 @@ def _maybe_override_verifier_path(config, cli_path: str | None) -> None:
         spec.verifier.name_or_path = cli_path
 
 
+def _checkpoint_has_key(path: str, key: str) -> bool:
+    from safetensors import safe_open  # noqa: PLC0415
+
+    for f in sorted(Path(path).glob("*.safetensors")):
+        with safe_open(str(f), framework="pt") as handle:
+            if key in handle.keys():
+                return True
+    return False
+
+
 def _check_warm_start_keys(model: SpeculatorModel, path: str) -> None:
     """Allow a warm start to miss only the newly added module keys.
 
@@ -588,6 +598,14 @@ def build_draft_model(
             )
             if arch_overrides:
                 _check_warm_start_keys(model, args.from_pretrained)
+            emb = getattr(model, "carry_embedding", None)
+            if emb is not None and not _checkpoint_has_key(
+                args.from_pretrained, "carry_embedding"
+            ):
+                # Carryover warm start: the checkpoint has no carry embedding, so
+                # start from zero ("no explicit discrimination").
+                with torch.no_grad():
+                    emb.zero_()
             return model
         return model_class.from_pretrained(
             args.from_pretrained,
@@ -798,7 +816,7 @@ def main(cfg: TrainConfig):  # noqa: C901
                 "block_size": args.block_size,
                 "max_anchors": args.max_anchors,
                 # Rejected rows per anchor are at most the first draft's length.
-                "max_carry": 8,
+                "max_carry": 4,
             }
             if getattr(args, "carryover_data", None)
             else None
