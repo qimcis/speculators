@@ -135,7 +135,7 @@ def test_carry_rows_change_only_their_owner_block():
 
 
 def test_transitions_roundtrip_and_shift(tmp_path):
-    K, L = 4, 2
+    K, L = 4, 3  # 2 tap layers + final residual
     anchors = torch.tensor([2, 8, 15])
     accepted = torch.tensor([1, 4, 0])  # rows: 3, 0, 4
     rows = int((K - accepted).sum())
@@ -153,13 +153,13 @@ def test_transitions_roundtrip_and_shift(tmp_path):
         str(tmp_path / "tr_0.safetensors"),
     )
     tr = load_transitions(tmp_path / "tr_0.safetensors")
-    assert torch.allclose(tr["carry_states"], states.flatten(1), rtol=0.1, atol=0.05)
+    assert torch.allclose(tr["carry_states"], states[:, :-1].flatten(1), rtol=0.1, atol=0.05)
     sa, st, pos, cnt = shifted_transitions(tr, T, BLOCK, torch.ones(T))
     # anchor 2 (shifted 15+0+1=16) still fits: 16 + 4 <= 24.
     assert sa.tolist() == [4, 13, 16]
     assert cnt.tolist() == [3, 0, 4]
     assert pos.tolist() == [4, 5, 6, 16, 17, 18, 19]
-    assert st.shape == (7, L * D)
+    assert st.shape == (7, (L - 1) * D)
 
 
 def test_collate_packs_fixed_shapes():

@@ -5,7 +5,8 @@ per dataset row, ``tr_<file_idx>.safetensors``, built by ``scripts/carryover``:
 
     anchors        int64 [n]          first-draft anchors a_i (window-local positions)
     accepted       int64 [n]          greedy accept length m_i of the first draft (0..K)
-    carry_states   fp8   [R, L, H]    rejected-suffix target states, anchor-major;
+    carry_states   fp8   [R, L+1, H]  rejected-suffix target states (the L tap layers
+                                      then the final residual, as captured), anchor-major;
                                       anchor i owns K - m_i rows, at positions
                                       a_i + m_i + 1 + j (j = 0..K-m_i-1)
     carry_scales   fp32  [R, L, 1]    per-(row, layer) dequantization scales
@@ -38,6 +39,7 @@ def load_transitions(path: Path) -> dict[str, torch.Tensor] | None:
         return None
     data = load_file(str(path))
     states = data["carry_states"].float() * data["carry_scales"].float()
+    states = states[:, :-1]  # the drafter's fc reads the tap layers, not the final stream
     return {
         "anchors": data["anchors"].long(),
         "accepted": data["accepted"].long(),
