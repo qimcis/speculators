@@ -99,8 +99,9 @@ class CarryoverDataset(BaseDataset):
         if tr is None:
             return SampleUnavailable(reason=f"no carryover transitions for row {file_idx}")
         seq_len = data["input_ids"].shape[0]
+        data["loss_mask"] = torch.as_tensor(data["loss_mask"])
         anchors, states, positions, counts = shifted_transitions(
-            tr, seq_len, self.block_size, torch.as_tensor(data["loss_mask"])
+            tr, seq_len, self.block_size, data["loss_mask"]
         )
         data["carry_anchors"] = anchors
         data["carry_states"] = states
