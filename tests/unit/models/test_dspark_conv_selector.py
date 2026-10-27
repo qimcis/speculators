@@ -108,8 +108,23 @@ def test_hf_init_weights_restores_identity_conv():
     assert torch.equal(conv.base_kernel[:, 1], torch.zeros_like(conv.base_kernel[:, 1]))
 
 
-def test_zero_selector_keeps_backbone_loss_and_trains(tmp_path):
+def test_zero_reweight_selector_is_exact_identity_and_trains(tmp_path):
     base, warm, new = _base_and_warm(tmp_path, dspark_conv=True, dspark_selector=True)
+    assert warm.config.dspark_selector_mode == "reweight"
+    _, l0, m0 = _run(base)
+    _, l1, m1 = _run(warm)
+    assert torch.equal(l0, l1)
+    for k in ("accept_len_sum", "eal_sum", "position_3_acc_sum"):
+        assert torch.equal(m0[k], m1[k]), k
+    l1.backward()
+    assert torch.count_nonzero(warm.candidate_selector.succ_proj.weight.grad)
+    assert torch.count_nonzero(warm.candidate_selector.succ_proj.bias.grad)
+
+
+def test_zero_truncate_selector_keeps_backbone_loss_and_trains(tmp_path):
+    base, warm, new = _base_and_warm(
+        tmp_path, dspark_conv=True, dspark_selector=True, dspark_selector_mode="truncate"
+    )
     _, l0, m0 = _run(base)
     _, l1, m1 = _run(warm)
     # The DSpark part of the loss is unchanged; the selector adds its own term.

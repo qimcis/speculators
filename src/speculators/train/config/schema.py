@@ -571,6 +571,12 @@ class DSparkArgs(_Group):
         "is linear in (default lm_head; predecessor always uses the input "
         "embedding).",
     )
+    dspark_selector_mode: Literal["reweight", "truncate"] | None = Field(
+        default=None,
+        description="DSpark selector: 'reweight' (default) adds the transition "
+        "score to the top-K logits and keeps full support; 'truncate' samples "
+        "only among the K candidates.",
+    )
     dspark_selector_candidates: Literal["corrected", "unary"] | None = Field(
         default=None,
         description="DSpark selector: rerank the top-K of the Markov-corrected "

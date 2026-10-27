@@ -99,6 +99,16 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     )
     dspark_selector_rank: int = Field(default=256, ge=1)
     dspark_selector_top_k: int = Field(default=16, ge=1)
+    dspark_selector_mode: Literal["reweight", "truncate"] = Field(
+        default="reweight",
+        description=(
+            "'reweight': add the transition score to the top-K candidates' "
+            "logits and keep every other token at its corrected logit (full "
+            "support; a zero selector is exactly plain DSpark; trained through "
+            "the DSpark loss on the full distribution). 'truncate': sample only "
+            "among the K candidates (DFlash2-style; extra K-way CE+TV loss)."
+        ),
+    )
     dspark_selector_candidates: Literal["corrected", "unary"] = Field(
         default="corrected",
         description=(

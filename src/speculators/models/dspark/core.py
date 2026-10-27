@@ -179,6 +179,8 @@ class DSparkDraftModel(DFlashDraftModel):
             "dspark_selector_rank",
             "dspark_selector_top_k",
             "dspark_selector_succ_basis",
+            "dspark_selector_candidates",
+            "dspark_selector_mode",
             "carryover",
         ):
             if kwargs.get(key) is not None:
@@ -320,6 +322,39 @@ class DSparkDraftModel(DFlashDraftModel):
                 1, mask_tokens_size, -1
             )
 
+        reweight = (
+            self.candidate_selector is not None
+            and self.config.dspark_selector_mode == "reweight"
+        )
+        if reweight:
+            # Non-truncating selector: add the transition score to the top-K
+            # candidates (of the corrected or unary logits) and leave every
+            # other token at its corrected logit. The DSpark loss below then
+            # trains the selector on the full re-weighted distribution.
+            with torch.no_grad():
+                cand_source = (
+                    logits
+                    if self.config.dspark_selector_candidates == "corrected"
+                    else unary_logits
+                )
+                rw_ids = cand_source.detach().topk(
+                    self.candidate_selector.top_k, dim=-1
+                ).indices
+            pred_table, succ_table = self.candidate_selector.tables(
+                self.embed_tokens.weight,
+                self.lm_head.weight
+                if self.config.dspark_selector_succ_basis == "lm_head"
+                else None,
+            )
+            rw_transition = self.candidate_selector.transition_scores(
+                pred_table=pred_table,
+                succ_table=succ_table,
+                hidden_states=hidden,
+                predecessor_ids=prev_token_ids.reshape(1, -1),
+                candidate_ids=rw_ids,
+            )
+            logits = logits.scatter_add(-1, rw_ids, rw_transition.to(logits.dtype))
+
         if self.confidence_head is not None:
             # confidence_head_with_markov requires markov_rank > 0 (enforced in
             # __init__), so prev_emb is always set when the flag is on.
@@ -371,7 +406,7 @@ class DSparkDraftModel(DFlashDraftModel):
                 )
                 log_z = target_log_normalizer(targets)
             candidate_logits = logits.gather(-1, train_ids)
-            if self.candidate_selector is not None:
+            if self.candidate_selector is not None and not reweight:
                 pred_table, succ_table = self.candidate_selector.tables(
                     self.embed_tokens.weight,
                     self.lm_head.weight
